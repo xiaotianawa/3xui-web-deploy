@@ -18,7 +18,7 @@
 ├── backend/                 后端（Node.js + Express + ssh2 + ws）
 │   ├── package.json
 │   ├── scripts/
-│   │   └── install.sh       官方 3X-UI
+│   │   └── install.sh       官方 3X-UI 安装脚本
 │   └── src/
 │       ├── server.js        入口，静态托管 + WebSocket
 │       ├── wsHandler.js     WebSocket 消息处理
@@ -44,13 +44,24 @@
 
 ## 环境要求
 
-- Node.js >= 18（推荐 20 或更高）
-- 一台可 ssh 登录的 Linux 服务器（目标机，用于安装 3X-UI）
-- 后端运行环境需能访问目标服务器的 SSH 端口
+- Node.js >= 18（推荐 20 或更高）。
+  - 后端与前端都依赖 Node，请确保 `node -v` 输出 >= 18。
+- 一台可 SSH 登录的 Linux 服务器（目标机，用于安装 3X-UI）
+- 运行平台的主机需能访问目标服务器的 SSH 端口
+
+## 环境变量（全部可选，不配置也能直接运行）
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `PORT` | `3000` | 后端监听端口 |
+| `MAX_CONCURRENT` | `20` | 同时搭建的服务器数量上限 |
 
 ## 安装与启动
 
-### 1. 启动后端
+> 下面的顺序很关键：**先装后端 → 再构建前端 → 再启动后端**。
+> 如果跳过“构建前端”这一步，直接访问页面会 404 或白屏。
+
+### 1. 安装并启动后端
 
 ```bash
 cd backend
@@ -58,13 +69,36 @@ npm install
 npm start
 ```
 
-默认监听 3000 端口，可用环境变量修改：
+`npm start` 默认监听 3000 端口。可用环境变量修改：
 
 ```bash
 PORT=8080 npm start
 ```
 
-### 2. 启动前端（开发模式）
+> 注意：`npm start` 属于前台运行，关闭 SSH 或终端后进程会退出。
+> 正式使用请改用文末的 **pm2 常驻部署**。
+
+### 2. 构建前端（正式使用必做）
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+构建产物位于 `frontend/dist`，后端启动时会自动托管该目录。
+
+### 3. 启动后端托管前端
+
+```bash
+cd ../backend
+npm start
+# 浏览器访问 http://<后端主机>:3000
+```
+
+### 4. （可选）前端开发模式
+
+仅在前端调试时使用：
 
 ```bash
 cd frontend
@@ -72,22 +106,42 @@ npm install
 npm run dev
 ```
 
-开发模式默认 5173 端口，已在 vite.config.js 中把 /ws 代理到后端 3000。
+开发模式默认 5173 端口，已在 `vite.config.js` 中把 `/ws` 代理到后端 3000。
 
-### 3. 生产构建
+### 5. 生产常驻部署（推荐 pm2）
 
-```bash
-cd frontend
-npm run build
-```
-
-构建产物位于 frontend/dist，后端会自动托管该目录：
+正式部署建议用 pm2，保证进程常驻、崩溃自动拉起、支持开机自启：
 
 ```bash
-cd ../backend
-npm start
-# 浏览器访问 http://<后端主机>:3000
+# 安装 pm2
+npm install -g pm2
+
+# 启动后端
+cd backend
+pm2 start src/server.js --name 3xui-backend
+
+# 保存当前进程列表并设置开机自启
+pm2 save
+pm2 startup    # 按它输出的提示，复制并再执行一次那行命令
+
+# 常用命令
+pm2 list                   # 查看运行状态
+pm2 logs 3xui-backend      # 实时查看日志
+pm2 restart 3xui-backend   # 重启
+pm2 stop 3xui-backend      # 停止
 ```
+
+> 若执行 `pm2 -v` 提示 `command not found`：
+> 说明 npm 全局安装目录不在 PATH 中（常见于宝塔等自定义 Node 环境）。
+> 先查看全局前缀，再把它加进 PATH：
+> ```bash
+> npm config get prefix
+> # 假设输出为 /www/server/nodejs/v20.16.0，则：
+> export PATH=$PATH:$(npm config get prefix)/bin
+> # 永久生效：
+> echo 'export PATH=$PATH:'$(npm config get prefix)'/bin' >> ~/.bashrc
+> source ~/.bashrc
+> ```
 
 ## 使用步骤
 
@@ -99,17 +153,17 @@ npm start
 
 ## 工作原理
 
-官方脚本支持非交互模式。后端在 ssh 执行脚本前，注入以下环境变量：
+官方脚本支持非交互模式。后端在 SSH 执行脚本前，注入以下环境变量：
 
 | 环境变量 | 含义 |
 |---|---|
-| XUI_NONINTERACTIVE | 设为 1，启用非交互模式 |
-| XUI_USERNAME | 随机用户名 |
-| XUI_PASSWORD | 随机密码 |
-| XUI_PANEL_PORT | 随机面板端口 |
-| XUI_WEB_BASE_PATH | 随机 Web 访问路径 |
+| `XUI_NONINTERACTIVE` | 设为 1，启用非交互模式 |
+| `XUI_USERNAME` | 随机用户名 |
+| `XUI_PASSWORD` | 随机密码 |
+| `XUI_PANEL_PORT` | 随机面板端口 |
+| `XUI_WEB_BASE_PATH` | 随机 Web 访问路径 |
 
-脚本执行完成后，会在目标服务器生成 /etc/x-ui/install-result.env，
+脚本执行完成后，会在目标服务器生成 `/etc/x-ui/install-result.env`，
 后端读取并解析该文件，得到最终的访问地址、账号密码与 API Token。
 
 ## 安全说明
@@ -121,7 +175,22 @@ npm start
 
 ## 常见问题
 
-- 连接超时：检查服务器 IP、SSH 端口、防火墙是否放行
-- 认证失败：确认用户名、密码或私钥是否正确
-- 非 root 用户：后端会尝试 sudo，若失败请改用 root 账户
-- 安装失败：查看日志框中的具体报错，常见原因是系统发行版不受支持或端口被占用
+- **页面 404 或空白**：前端没构建。执行 `cd frontend && npm run build`，确认 `frontend/dist/index.html` 存在后重启后端。
+- **`pm2: command not found`**：npm 全局目录不在 PATH，见“生产常驻部署”一节的说明。
+- **连接超时**：检查服务器 IP、SSH 端口、防火墙是否放行。
+- **认证失败**：确认用户名、密码或私钥是否正确。
+- **非 root 用户**：后端会尝试 sudo，若失败请改用 root 账户。
+- **安装失败**：查看日志框中的具体报错，常见原因是系统发行版不受支持或端口被占用。
+
+## 更新日志
+
+### 2026-10-06
+
+- 经用户反馈，搭建并发连接数偏小，已将其默认值调大：从原本的 5 调整为 20
+- 支持环境变量 `MAX_CONCURRENT` 覆盖并发上限（该变量此前已支持，本次仅调整默认值），默认 20
+
+  ```bash
+  MAX_CONCURRENT=20 npm start
+  ```
+
+- 修复已知问题
