@@ -11,6 +11,9 @@ const LOCAL_SCRIPT = path.join(__dirname, '..', 'scripts', 'install.sh');
 const REMOTE_SCRIPT = '/tmp/xui-install.sh';
 const RESULT_FILE = '/etc/x-ui/install-result.env';
 
+// 安装脚本最长执行时间（默认 20 分钟），到点强制结束避免悬挂
+const INSTALL_TIMEOUT_MS = Number(process.env.INSTALL_TIMEOUT_MS || 20 * 60 * 1000);
+
 function buildRandomParams() {
   return {
     XUI_USERNAME: randStr(8),
@@ -55,8 +58,9 @@ function parseResultEnv(text) {
  */
 async function testConnection(opts) {
   let conn = null;
+  let timer = null;
   const overall = new Promise((resolve) => {
-    setTimeout(() => resolve({ ok: false, message: '测试超时（15 秒无响应），请检查服务器地址、SSH 端口或网络可达性' }), 15000);
+    timer = setTimeout(() => resolve({ ok: false, message: '测试超时（15 秒无响应），请检查服务器地址、SSH 端口或网络可达性' }), 15000);
   });
 
   const work = (async () => {
@@ -68,11 +72,13 @@ async function testConnection(opts) {
       return { ok: false, message: friendlyError(e) };
     } finally {
       if (conn) { try { conn.end(); } catch (x) {} }
+      conn = null; // 标记已关闭，避免下方再关一次
     }
   })();
 
   const result = await Promise.race([work, overall]);
-  if (!result.ok && conn) { try { conn.end(); } catch (e) {} }
+  if (timer) { clearTimeout(timer); timer = null; } // 无论哪边先返回，清掉定时器
+  if (!result.ok && conn) { try { conn.end(); } catch (e) {} conn = null; }
   return result;
 }
 
@@ -116,11 +122,31 @@ async function runInstall(opts, emit) {
     const cmd = 'XUI_NONINTERACTIVE=1 ' + envPrefix(params) + 'bash ' + REMOTE_SCRIPT + ' 2>&1';
     const runCmd = uid === '0' ? cmd : 'XUI_NONINTERACTIVE=1 ' + envPrefix(params) + 'sudo -E bash ' + REMOTE_SCRIPT + ' 2>&1';
 
-    const exitCode = await ssh.exec(conn, runCmd, (type, data) => {
-      if (type === 'stdout' || type === 'stderr') {
-        emit({ type: 'log', data: { stream: type, text: stripAnsi(data) } });
-      }
-    });
+    // 给安装脚本执行加整体超时，避免任务挂死导致通道一直占用
+    let installTimedOut = false;
+    let installTimer = null;
+    const exitCode = await Promise.race([
+      ssh.exec(conn, runCmd, (type, data) => {
+        if (type === 'stdout' || type === 'stderr') {
+          emit({ type: 'log', data: { stream: type, text: stripAnsi(data) } });
+        }
+      }),
+      new Promise((resolve) => {
+        installTimer = setTimeout(() => {
+          installTimedOut = true;
+          emit({ type: 'log', data: { stream: 'stderr', text: '\n[警告] 安装脚本执行超时（' + Math.round(INSTALL_TIMEOUT_MS / 60000) + ' 分钟），已强制终止。\n' } });
+          // 这里不再直接 conn.end()，统一交给函数末尾 finally 关闭，避免重复 end 触发 ssh2 原生内存双重释放
+          resolve(-1);
+        }, INSTALL_TIMEOUT_MS);
+      })
+    ]);
+    // 竞速结束（正常完成或超时），清掉定时器，避免堆积
+    if (installTimer) { clearTimeout(installTimer); installTimer = null; }
+
+    if (installTimedOut) {
+      emit({ type: 'status', data: { phase: 'error', message: '安装超时，任务已终止' } });
+      throw new Error('安装脚本执行超时，已强制终止');
+    }
 
     if (exitCode !== 0) {
       emit({ type: 'log', data: { stream: 'stderr', text: '\n安装脚本退出码非 0（' + exitCode + '），安装可能未完成。\n' } });
